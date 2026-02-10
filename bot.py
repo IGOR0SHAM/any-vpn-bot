@@ -1,5 +1,6 @@
 import os
 import asyncio
+import json
 import logging
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
@@ -16,6 +17,7 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 API_TOKEN = os.getenv("API_TOKEN")
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "").split(",") if x.strip()]
 
 API_BASE = os.getenv("URL_BASE")
 DB_FILE = "db.sqlite3"
@@ -42,6 +44,19 @@ keyboard = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+admin_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Зарегистрироваться")],
+        [KeyboardButton(text="Профиль")],
+        [KeyboardButton(text="Список")]
+    ],
+    resize_keyboard=True
+)
+
+
+def get_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    return admin_keyboard if user_id in ADMIN_IDS else keyboard
 
 # ──────────────── DB init ────────────────
 async def init_db():
@@ -85,7 +100,7 @@ async def start(message: types.Message):
 
     await message.answer(
         "Привет 👋\nВыбери действие:",
-        reply_markup=keyboard
+        reply_markup=get_keyboard(user_id)
     )
 
 # ──────────────── Регистрация ────────────────
@@ -121,7 +136,7 @@ async def save_username(message: types.Message, state: FSMContext):
 
     await message.answer(
         f"✅ Регистрация завершена\n\nОтвет сервера:\n{text}",
-        reply_markup=keyboard
+        reply_markup=get_keyboard(user_id)
     )
     await state.clear()
 
@@ -151,6 +166,50 @@ async def profile(message: types.Message):
         lines.append(f"\n{text}")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+# ──────────────── Админ: Список пользователей ────────────────
+def parse_users_from_api(data) -> list[str]:
+    """Из ответа API извлекаем список username."""
+    usernames = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and "username" in item:
+                usernames.append(str(item["username"]))
+            elif isinstance(item, str):
+                usernames.append(item)
+    elif isinstance(data, dict):
+        if "users" in data and isinstance(data["users"], list):
+            for item in data["users"]:
+                if isinstance(item, dict) and "username" in item:
+                    usernames.append(str(item["username"]))
+                elif isinstance(item, str):
+                    usernames.append(item)
+        elif "username" in data:
+            usernames.append(str(data["username"]))
+    return usernames
+
+
+@dp.message(F.text == "Список")
+async def admin_list(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with session.get(API_BASE) as resp:
+            text = await resp.text()
+    try:
+        data = json.loads(text)
+    except Exception:
+        await message.answer(f"Не удалось разобрать ответ API.\n\n{text[:2000]}")
+        return
+    usernames = parse_users_from_api(data)
+    if not usernames:
+        await message.answer("Список пуст или формат ответа не распознан.")
+        return
+    lines = ["📋 <b>Пользователи:</b>\n"] + [f"• {u}" for u in sorted(usernames)]
+    msg = "\n".join(lines)
+    if len(msg) > 4000:
+        msg = msg[:4000] + "\n… (обрезано)"
+    await message.answer(msg, parse_mode="HTML")
 
 # ──────────────── Run ────────────────
 async def main():
