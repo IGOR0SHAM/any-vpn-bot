@@ -49,7 +49,7 @@ admin_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Зарегистрироваться")],
         [KeyboardButton(text="Профиль")],
-        [KeyboardButton(text="Список")]
+        [KeyboardButton(text="Список"), KeyboardButton(text="БД")]
     ],
     resize_keyboard=True
 )
@@ -64,10 +64,19 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                username TEXT
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT
             )
         """)
         await db.commit()
+        # Миграция: добавить колонки, если их ещё нет
+        for col in ("first_name", "last_name"):
+            try:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+                await db.commit()
+            except Exception:
+                pass
 
 # ──────────────── DB utils ────────────────
 async def get_user(user_id: int):
@@ -80,23 +89,43 @@ async def get_user(user_id: int):
             return row[0] if row else None
 
 
-async def set_user(user_id: int, username: str | None):
+async def set_user(
+    user_id: int,
+    username: str | None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
-            INSERT INTO users (user_id, username)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET username = excluded.username
-        """, (user_id, username))
+            INSERT INTO users (user_id, username, first_name, last_name)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = COALESCE(excluded.username, username),
+                first_name = COALESCE(excluded.first_name, first_name),
+                last_name = COALESCE(excluded.last_name, last_name)
+        """, (user_id, username, first_name or None, last_name or None))
         await db.commit()
+
+
+async def get_all_users() -> list[tuple[int, str | None, str | None, str | None]]:
+    """Возвращает (user_id, username, first_name, last_name) для всех пользователей."""
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            "SELECT user_id, username, first_name, last_name FROM users ORDER BY user_id"
+        ) as cursor:
+            return [tuple(row) for row in await cursor.fetchall()]
 
 # ──────────────── Handlers ────────────────
 @dp.message(CommandStart())
 async def start(message: types.Message):
     user_id = message.from_user.id
 
+    u = message.from_user
     user = await get_user(user_id)
     if user is None:
-        await set_user(user_id, None)
+        await set_user(user_id, None, u.first_name, u.last_name)
+    else:
+        await set_user(user_id, user, u.first_name, u.last_name)
 
     await message.answer(
         "Привет 👋\nВыбери действие:",
@@ -122,7 +151,8 @@ async def save_username(message: types.Message, state: FSMContext):
     username = message.text.strip()
     user_id = message.from_user.id
 
-    await set_user(user_id, username)
+    u = message.from_user
+    await set_user(user_id, username, u.first_name, u.last_name)
 
     payload = {
         "username": username,
@@ -206,6 +236,25 @@ async def admin_list(message: types.Message):
         await message.answer("Список пуст или формат ответа не распознан.")
         return
     lines = ["📋 <b>Пользователи:</b>\n"] + [f"• {u}" for u in sorted(usernames)]
+    msg = "\n".join(lines)
+    if len(msg) > 4000:
+        msg = msg[:4000] + "\n… (обрезано)"
+    await message.answer(msg, parse_mode="HTML")
+
+
+@dp.message(F.text == "БД")
+async def admin_db_list(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    rows = await get_all_users()
+    if not rows:
+        await message.answer("В БД пока никого нет.")
+        return
+    lines = ["📋 <b>Пользователи (БД):</b>\nФормат: user_id — username в API — first_name last_name\n"]
+    for user_id, username, first_name, last_name in rows:
+        name = " ".join(filter(None, (first_name or "", last_name or ""))).strip() or "—"
+        api_user = username or "—"
+        lines.append(f"<code>{user_id}</code> — {api_user} — {name}")
     msg = "\n".join(lines)
     if len(msg) > 4000:
         msg = msg[:4000] + "\n… (обрезано)"
