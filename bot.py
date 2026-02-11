@@ -9,9 +9,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import aiohttp
-import aiosqlite
 
 from parser import parse_profile_json
+from database import init_db, get_user, set_user, get_all_users
 
 load_dotenv()
 
@@ -20,7 +20,6 @@ API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "").split(",") if x.strip()]
 
 API_BASE = os.getenv("URL_BASE")
-DB_FILE = "db.sqlite3"
 
 HEADERS = {
     "Authorization": API_TOKEN,
@@ -57,63 +56,6 @@ admin_keyboard = ReplyKeyboardMarkup(
 
 def get_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     return admin_keyboard if user_id in ADMIN_IDS else keyboard
-
-# ──────────────── DB init ────────────────
-async def init_db():
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT
-            )
-        """)
-        await db.commit()
-        # Миграция: добавить колонки, если их ещё нет
-        for col in ("first_name", "last_name"):
-            try:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
-                await db.commit()
-            except Exception:
-                pass
-
-# ──────────────── DB utils ────────────────
-async def get_user(user_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(
-            "SELECT username FROM users WHERE user_id = ?",
-            (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
-
-async def set_user(
-    user_id: int,
-    username: str | None,
-    first_name: str | None = None,
-    last_name: str | None = None,
-):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            INSERT INTO users (user_id, username, first_name, last_name)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = COALESCE(excluded.username, username),
-                first_name = COALESCE(excluded.first_name, first_name),
-                last_name = COALESCE(excluded.last_name, last_name)
-        """, (user_id, username, first_name or None, last_name or None))
-        await db.commit()
-
-
-async def get_all_users() -> list[tuple[int, str | None, str | None, str | None]]:
-    """Возвращает (user_id, username, first_name, last_name) для всех пользователей."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(
-            "SELECT user_id, username, first_name, last_name FROM users ORDER BY user_id"
-        ) as cursor:
-            return [tuple(row) for row in await cursor.fetchall()]
 
 # ──────────────── Handlers ────────────────
 @dp.message(CommandStart())
@@ -250,11 +192,11 @@ async def admin_db_list(message: types.Message):
     if not rows:
         await message.answer("В БД пока никого нет.")
         return
-    lines = ["📋 <b>Пользователи (БД):</b>\nФормат: user_id — username в API — first_name last_name\n"]
-    for user_id, username, first_name, last_name in rows:
-        name = " ".join(filter(None, (first_name or "", last_name or ""))).strip() or "—"
-        api_user = username or "—"
-        lines.append(f"<code>{user_id}</code> — {api_user} — {name}")
+    lines = ["📋 <b>Пользователи (БД):</b>\nФормат: id — user_id — username в API — first_name last_name\n"]
+    for row in rows:
+        name = " ".join(filter(None, (row.first_name or "", row.last_name or ""))).strip() or "—"
+        api_user = row.username or "—"
+        lines.append(f"<code>{row.id}</code> — <code>{row.user_id}</code> — {api_user} — {name}")
     msg = "\n".join(lines)
     if len(msg) > 4000:
         msg = msg[:4000] + "\n… (обрезано)"
